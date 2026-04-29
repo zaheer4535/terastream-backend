@@ -1,0 +1,258 @@
+const express = require('express');
+const cors = require('cors');
+const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
+const morgan = require('morgan');
+const fs = require('fs');
+const path = require('path');
+
+const app = express();
+const PORT = process.env.PORT || 3001;
+
+// ─── In-memory storage (replace with DB in production) ───────────────────────
+let stats = { totalPlays: 0, totalUsers: 0, apiCalls: 0, errors: 0 };
+let linkLogs = [];
+let blockedIPs = [];
+let adSettings = {
+  enabled: true,
+  beforeVideo: '<div style="text-align:center;padding:10px;background:#111;color:#FFC300;">Advertisement Space - Before Video</div>',
+  insidePlayer: '',
+  belowPlayer: '<div style="text-align:center;padding:10px;background:#111;color:#FFC300;">Advertisement Space - Below Player</div>',
+};
+let siteSettings = {
+  siteName: 'TeraStream',
+  accentColor: '#FFC300',
+  rateLimit: 30,
+  apiKey: 'sk_82289e8a832c75a8a835599f8efedc37',
+};
+let customPages = [];
+let uniqueIPs = new Set();
+
+// ─── Middleware ───────────────────────────────────────────────────────────────
+app.use(helmet({ crossOriginEmbedderPolicy: false }));
+app.use(cors({ origin: '*' }));
+app.use(express.json());
+app.use(morgan('dev'));
+
+// ─── IP Blocking Middleware ───────────────────────────────────────────────────
+app.use((req, res, next) => {
+  const ip = req.ip || req.connection.remoteAddress;
+  if (blockedIPs.includes(ip)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  if (!uniqueIPs.has(ip)) {
+    uniqueIPs.add(ip);
+    stats.totalUsers = uniqueIPs.size;
+  }
+  next();
+});
+
+// ─── Rate Limiter ─────────────────────────────────────────────────────────────
+const limiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: () => siteSettings.rateLimit,
+  message: { error: 'Too many requests. Please wait a moment.' },
+  keyGenerator: (req) => req.ip,
+});
+
+// ─── Admin Auth Middleware ─────────────────────────────────────────────────────
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
+const adminAuth = (req, res, next) => {
+  const token = req.headers['x-admin-token'];
+  if (token !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
+};
+
+// ─── Main API: Process TeraBox Link ──────────────────────────────────────────
+app.post('/api/process', limiter, async (req, res) => {
+  const { url } = req.body;
+  const ip = req.ip;
+
+  if (!url || typeof url !== 'string') {
+    return res.status(400).json({ error: 'URL is required' });
+  }
+
+  // Sanitize input
+  const sanitizedUrl = url.trim().substring(0, 2048);
+
+  try {
+    stats.apiCalls++;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+
+    const response = await fetch('https://xapiverse.com/api/terabox', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'xAPIverse-Key': siteSettings.apiKey,
+      },
+      body: JSON.stringify({ url: sanitizedUrl }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+
+    const data = await response.json();
+
+    if (!response.ok || !data || !data.list || !data.list[0]) {
+      stats.errors++;
+      linkLogs.unshift({
+        id: Date.now(),
+        url: sanitizedUrl,
+        ip,
+        time: new Date().toISOString(),
+        status: 'error',
+        error: data?.message || 'Invalid response from API',
+      });
+      if (linkLogs.length > 500) linkLogs = linkLogs.slice(0, 500);
+      return res.status(400).json({ error: data?.message || 'Failed to process link. Please check the URL.' });
+    }
+
+    const item = data.list[0];
+    stats.totalPlays++;
+
+    const result = {
+      title: item.filename || item.server_filename || 'Video',
+      thumbnail: item.thumbnail || item.thumbs?.url3 || '',
+      duration: item.duration || 0,
+      size: item.size || 0,
+      streams: {
+        '480p': item.fast_stream_url?.['480p'] || item.fast_stream_url?.['360p'] || '',
+        '720p': item.fast_stream_url?.['720p'] || '',
+        '1080p': item.fast_stream_url?.['1080p'] || '',
+        default: item.fast_stream_url?.['480p'] || Object.values(item.fast_stream_url || {})[0] || '',
+      },
+      downloadUrl: item.normal_dlink || item.dlink || '',
+      adSettings: adSettings.enabled ? {
+        beforeVideo: adSettings.beforeVideo,
+        insidePlayer: adSettings.insidePlayer,
+        belowPlayer: adSettings.belowPlayer,
+      } : null,
+    };
+
+    linkLogs.unshift({
+      id: Date.now(),
+      url: sanitizedUrl,
+      ip,
+      time: new Date().toISOString(),
+      status: 'success',
+      title: result.title,
+    });
+    if (linkLogs.length > 500) linkLogs = linkLogs.slice(0, 500);
+
+    res.json(result);
+  } catch (err) {
+    stats.errors++;
+    linkLogs.unshift({
+      id: Date.now(),
+      url: sanitizedUrl,
+      ip,
+      time: new Date().toISOString(),
+      status: 'error',
+      error: err.message,
+    });
+    if (linkLogs.length > 500) linkLogs = linkLogs.slice(0, 500);
+
+    if (err.name === 'AbortError') {
+      return res.status(504).json({ error: 'API request timed out. Please try again.' });
+    }
+    res.status(500).json({ error: 'Server error. Please try again later.' });
+  }
+});
+
+// ─── Admin Login ──────────────────────────────────────────────────────────────
+app.post('/api/admin/login', (req, res) => {
+  const { password } = req.body;
+  if (password === ADMIN_PASSWORD) {
+    res.json({ token: ADMIN_PASSWORD, success: true });
+  } else {
+    res.status(401).json({ error: 'Invalid password' });
+  }
+});
+
+// ─── Admin: Stats ─────────────────────────────────────────────────────────────
+app.get('/api/admin/stats', adminAuth, (req, res) => {
+  res.json({ ...stats, recentLogs: linkLogs.slice(0, 10) });
+});
+
+// ─── Admin: Logs ─────────────────────────────────────────────────────────────
+app.get('/api/admin/logs', adminAuth, (req, res) => {
+  const page = parseInt(req.query.page) || 1;
+  const limit = 20;
+  const start = (page - 1) * limit;
+  res.json({
+    logs: linkLogs.slice(start, start + limit),
+    total: linkLogs.length,
+    pages: Math.ceil(linkLogs.length / limit),
+  });
+});
+
+// ─── Admin: Clear Logs ────────────────────────────────────────────────────────
+app.delete('/api/admin/logs', adminAuth, (req, res) => {
+  linkLogs = [];
+  res.json({ success: true });
+});
+
+// ─── Admin: Ad Settings ───────────────────────────────────────────────────────
+app.get('/api/admin/ads', adminAuth, (req, res) => res.json(adSettings));
+app.put('/api/admin/ads', adminAuth, (req, res) => {
+  adSettings = { ...adSettings, ...req.body };
+  res.json(adSettings);
+});
+
+// ─── Admin: Site Settings ─────────────────────────────────────────────────────
+app.get('/api/admin/settings', adminAuth, (req, res) => {
+  const { apiKey, ...safeSettings } = siteSettings;
+  res.json({ ...safeSettings, apiKeySet: !!apiKey });
+});
+app.put('/api/admin/settings', adminAuth, (req, res) => {
+  siteSettings = { ...siteSettings, ...req.body };
+  res.json({ success: true });
+});
+
+// ─── Admin: IP Management ─────────────────────────────────────────────────────
+app.get('/api/admin/blocked-ips', adminAuth, (req, res) => res.json(blockedIPs));
+app.post('/api/admin/blocked-ips', adminAuth, (req, res) => {
+  const { ip } = req.body;
+  if (ip && !blockedIPs.includes(ip)) blockedIPs.push(ip);
+  res.json(blockedIPs);
+});
+app.delete('/api/admin/blocked-ips/:ip', adminAuth, (req, res) => {
+  blockedIPs = blockedIPs.filter(i => i !== req.params.ip);
+  res.json(blockedIPs);
+});
+
+// ─── Admin: Custom Pages ──────────────────────────────────────────────────────
+app.get('/api/admin/pages', adminAuth, (req, res) => res.json(customPages));
+app.post('/api/admin/pages', adminAuth, (req, res) => {
+  const page = { id: Date.now(), ...req.body, createdAt: new Date().toISOString() };
+  customPages.push(page);
+  res.json(page);
+});
+app.put('/api/admin/pages/:id', adminAuth, (req, res) => {
+  const idx = customPages.findIndex(p => p.id == req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Page not found' });
+  customPages[idx] = { ...customPages[idx], ...req.body };
+  res.json(customPages[idx]);
+});
+app.delete('/api/admin/pages/:id', adminAuth, (req, res) => {
+  customPages = customPages.filter(p => p.id != req.params.id);
+  res.json({ success: true });
+});
+
+// ─── Public: Site Info ────────────────────────────────────────────────────────
+app.get('/api/site-info', (req, res) => {
+  res.json({ siteName: siteSettings.siteName, accentColor: siteSettings.accentColor });
+});
+
+// ─── Public: Custom Page ──────────────────────────────────────────────────────
+app.get('/api/pages/:slug', (req, res) => {
+  const page = customPages.find(p => p.slug === req.params.slug);
+  if (!page) return res.status(404).json({ error: 'Page not found' });
+  res.json(page);
+});
+
+app.listen(PORT, () => console.log(`✅ TeraStream backend running on port ${PORT}`));
