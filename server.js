@@ -266,4 +266,6 @@ app.get('/api/pages/:slug', (req, res) => {
   res.json(page);
 });
 
-app.listen(PORT, () => console.log(`✅ TeraStream backend running on port ${PORT}`));
+app.listen(process.env.PORT || 3000, '0.0.0.0', () => {
+  console.log(`Server running on port ${process.env.PORT}`);
+});
