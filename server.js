@@ -8,7 +8,7 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3000;
 
 // ─── In-memory storage (replace with DB in production) ───────────────────────
 let stats = { totalPlays: 0, totalUsers: 0, apiCalls: 0, errors: 0 };
@@ -266,6 +266,6 @@ app.get('/api/pages/:slug', (req, res) => {
   res.json(page);
 });
 
-app.listen(process.env.PORT || 3000, '0.0.0.0', () => {
-  console.log(`Server running on port ${process.env.PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ Server running on port ${PORT}`);
 });
