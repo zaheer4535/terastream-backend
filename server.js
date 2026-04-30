@@ -78,14 +78,10 @@ app.post('/api/process', limiter, async (req, res) => {
     return res.status(400).json({ error: 'URL is required' });
   }
 
-  // Sanitize input
   const sanitizedUrl = url.trim().substring(0, 2048);
 
   try {
     stats.apiCalls++;
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
 
     const response = await fetch('https://xapiverse.com/api/terabox', {
       method: 'POST',
@@ -94,12 +90,23 @@ app.post('/api/process', limiter, async (req, res) => {
         'xAPIverse-Key': siteSettings.apiKey,
       },
       body: JSON.stringify({ url: sanitizedUrl }),
-      signal: controller.signal,
     });
 
-    clearTimeout(timeout);
+    // 🔥 DEBUG
+    console.log("Status:", response.status);
 
-    const data = await response.json();
+    const text = await response.text();
+    console.log("Raw response:", text);
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      return res.status(500).json({
+        error: "Invalid JSON from API",
+        raw: text
+      });
+    }
 
     if (!response.ok || !data || !data.list || !data.list[0]) {
       stats.errors++;
@@ -111,30 +118,23 @@ app.post('/api/process', limiter, async (req, res) => {
         status: 'error',
         error: data?.message || 'Invalid response from API',
       });
-      if (linkLogs.length > 500) linkLogs = linkLogs.slice(0, 500);
-      return res.status(400).json({ error: data?.message || 'Failed to process link. Please check the URL.' });
+
+      return res.status(400).json({
+        error: data?.message || 'API failed',
+        details: data
+      });
     }
 
     const item = data.list[0];
     stats.totalPlays++;
 
     const result = {
-      title: item.filename || item.server_filename || 'Video',
-      thumbnail: item.thumbnail || item.thumbs?.url3 || '',
-      duration: item.duration || 0,
+      title: item.name || item.filename || 'Video',
+      thumbnail: item.thumbnail || '',
+      duration: item.duration || '',
       size: item.size || 0,
-      streams: {
-        '480p': item.fast_stream_url?.['480p'] || item.fast_stream_url?.['360p'] || '',
-        '720p': item.fast_stream_url?.['720p'] || '',
-        '1080p': item.fast_stream_url?.['1080p'] || '',
-        default: item.fast_stream_url?.['480p'] || Object.values(item.fast_stream_url || {})[0] || '',
-      },
-      downloadUrl: item.normal_dlink || item.dlink || '',
-      adSettings: adSettings.enabled ? {
-        beforeVideo: adSettings.beforeVideo,
-        insidePlayer: adSettings.insidePlayer,
-        belowPlayer: adSettings.belowPlayer,
-      } : null,
+      streams: item.fast_stream_url || {},
+      downloadUrl: item.normal_dlink || '',
     };
 
     linkLogs.unshift({
@@ -145,11 +145,14 @@ app.post('/api/process', limiter, async (req, res) => {
       status: 'success',
       title: result.title,
     });
-    if (linkLogs.length > 500) linkLogs = linkLogs.slice(0, 500);
 
     res.json(result);
+
   } catch (err) {
+    console.error("API ERROR:", err);
+
     stats.errors++;
+
     linkLogs.unshift({
       id: Date.now(),
       url: sanitizedUrl,
@@ -158,12 +161,11 @@ app.post('/api/process', limiter, async (req, res) => {
       status: 'error',
       error: err.message,
     });
-    if (linkLogs.length > 500) linkLogs = linkLogs.slice(0, 500);
 
-    if (err.name === 'AbortError') {
-      return res.status(504).json({ error: 'API request timed out. Please try again.' });
-    }
-    res.status(500).json({ error: 'Server error. Please try again later.' });
+    res.status(500).json({
+      error: 'Server error',
+      details: err.message
+    });
   }
 });
 
