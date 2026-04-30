@@ -108,22 +108,27 @@ app.post('/api/process', limiter, async (req, res) => {
       });
     }
 
-    if (!response.ok || !data || !data.list || !data.list[0]) {
-      stats.errors++;
-      linkLogs.unshift({
-        id: Date.now(),
-        url: sanitizedUrl,
-        ip,
-        time: new Date().toISOString(),
-        status: 'error',
-        error: data?.message || 'Invalid response from API',
-      });
+   // 🔹 Step 1: API fail
+if (!response.ok) {
+  return res.status(500).json({
+    error: "API request failed",
+    status: response.status
+  });
+}
 
-      return res.status(400).json({
-        error: data?.message || 'API failed',
-        details: data
-      });
-    }
+// 🔹 Step 2: invalid response
+if (!data || data.status !== "success") {
+  return res.status(400).json({
+    error: data?.message || "Invalid API response"
+  });
+}
+
+// 🔹 Step 3: empty video list
+if (!data.list || data.list.length === 0) {
+  return res.status(404).json({
+    error: "No video found in link"
+  });
+}
 
     const item = data.list[0];
     stats.totalPlays++;
