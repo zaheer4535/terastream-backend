@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const fetch = require('node-fetch');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 const morgan = require('morgan');
@@ -19,6 +20,9 @@ let adSettings = {
   insidePlayer: '',
   belowPlayer: '<div style="text-align:center;padding:10px;background:#111;color:#FFC300;">Advertisement Space - Below Player</div>',
 };
+app.get("/", (req, res) => {
+  res.send("Server is working ✅");
+});
 let siteSettings = {
   siteName: 'TeraStream',
   accentColor: '#FFC300',
